@@ -11,14 +11,38 @@ but not the RCS threads sitting in Google Messages. This is the missing takeout.
 > (MIT). The original stopped matching the Google Messages DOM; see
 > [What changed](#what-changed).
 
+![The messages-takeout menu, in light and dark themes](docs/menu.png)
+
 ---
 
 ## Usage
 
+### The menu
+
 1. Open <https://messages.google.com/web> and select a conversation.
 2. Open DevTools (`F12`) and switch to the **Console** tab.
-3. Paste in the contents of [`exportConversation.js`](exportConversation.js).
-4. Export:
+3. Paste in the contents of [`exportConversation.js`](exportConversation.js)
+   and press Enter.
+
+The panel above appears in the corner. Pick a range, pick a format, then
+**Download** or **Copy**. Drag it by its header if it covers something; close it
+with **✕** and reopen it with `showExportMenu()`.
+
+### As a bookmarklet
+
+To skip DevTools entirely, save it as a bookmark once and click it on any
+conversation:
+
+1. Copy the single line from [`bookmark.js`](bookmark.js).
+2. Create a new bookmark (Chrome: `Ctrl+Shift+O` → ⋮ → *Add new bookmark*).
+3. Name it anything; paste the line into the **URL** field.
+4. Open a conversation and click the bookmark — the menu opens.
+
+Clicking it again is safe: it replaces the menu rather than stacking copies.
+
+### From the console
+
+The functions stay available for scripting:
 
 ```js
 await exportConversation();                        // last 7 days, as text
@@ -26,6 +50,7 @@ copy(await exportConversation());                  // ...onto the clipboard
 await exportConversation({ returnJson: true });    // structured objects
 await downloadConversation();                      // save conversation.txt
 await downloadConversation({ format: "json" });    // save conversation.json
+await downloadConversation({ format: "csv" });     // save conversation.csv
 ```
 
 The script is **async** — `exportConversation()` without `await` gives you a
@@ -78,6 +103,18 @@ Hello!
 [Tuesday, January 20, 2026, 12:06 PM] John Doe:
 Hi!
 (reactions: ❤️ Me)
+```
+
+### CSV
+
+Columns are `iso, date, time, sender, direction, text, reactions`. Fields are
+quoted per RFC 4180, so messages containing commas or line breaks stay in one
+record, and the file carries a UTF-8 BOM so Excel renders emoji correctly.
+
+```csv
+iso,date,time,sender,direction,text,reactions
+2026-01-20T17:05:00.000Z,"Tuesday, January 20, 2026",12:05 PM,Me,sent,Hello!,
+2026-01-20T17:06:00.000Z,"Tuesday, January 20, 2026",12:06 PM,John Doe,received,Hi!,❤️ Me
 ```
 
 ### JSON
@@ -141,6 +178,10 @@ types labelled from their tag rather than skipped.
   synced to it, which is not necessarily the whole thread.
 - **It clicks one button.** To page the thread in, the script clicks the app's
   own "Load more messages". Otherwise it only reads the page.
+- **The menu avoids `innerHTML`.** messages.google.com enforces Trusted Types,
+  so assigning `innerHTML` throws `This document requires 'TrustedHTML'`. The UI
+  is built with `createElement`/`textContent` in a shadow root with a
+  constructable stylesheet, which the policy allows.
 - Tested against Google Messages web as of August 2026. It reads Angular
   component tags (`mws-message-wrapper` and friends), so a Google redesign can
   break it — the failure mode to watch for is a suspiciously short export.

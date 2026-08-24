@@ -379,10 +379,54 @@ async function exportConversation(options = {}) {
 	}
 
 	if (returnJson) return messages;
+	return mwsToText(messages);
+}
 
+function mwsToText(messages) {
 	return messages
 		.map(m => `[${m.date}${m.time ? ", " + m.time : ""}] ${m.name}:\n${m.text}`)
 		.join("\n\n");
+}
+
+// RFC 4180: quote anything containing a comma, quote or newline, and double the
+// internal quotes. The BOM makes Excel read the emoji and accents as UTF-8.
+function mwsToCsv(messages) {
+	const cell = value => {
+		const text = value == null ? "" : String(value);
+		return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+	};
+
+	const header = ["iso", "date", "time", "sender", "direction", "text", "reactions"];
+	const rows = messages.map(m => [
+		m.iso || "", m.date || "", m.time || "", m.name || "",
+		m.outgoing ? "sent" : "received",
+		m.text || "",
+		mwsReactionSummary(m.reactions || []),
+	].map(cell).join(","));
+
+	return "\uFEFF" + [header.join(","), ...rows].join("\r\n");
+}
+
+function mwsFormat(messages, format) {
+	if (format === "json") return JSON.stringify(messages, null, 2);
+	if (format === "csv") return mwsToCsv(messages);
+	return mwsToText(messages);
+}
+
+function mwsSaveFile(body, format, filename) {
+	const types = { json: "application/json", csv: "text/csv", text: "text/plain" };
+	const extensions = { json: "json", csv: "csv", text: "txt" };
+
+	const blob = new Blob([body], { type: `${types[format] || types.text};charset=utf-8` });
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+
+	link.href = url;
+	link.download = filename || `conversation.${extensions[format] || "txt"}`;
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // Google Messages keeps only the newest ~25 messages in the DOM and pages older ones
@@ -450,23 +494,278 @@ async function loadThreadUntil(conversation, opts) {
 
 async function downloadConversation(options = {}) {
 	const { format = "text", filename = null, ...rest } = options;
-	const json = format === "json";
 
-	const data = await exportConversation({ ...rest, returnJson: json });
-	const body = json ? JSON.stringify(data, null, 2) : data;
+	const messages = await exportConversation({ ...rest, returnJson: true });
+	const body = mwsFormat(messages, format);
 
-	const blob = new Blob([body], {
-		type: json ? "application/json;charset=utf-8" : "text/plain;charset=utf-8",
+	mwsSaveFile(body, format, filename);
+	return messages.length;
+}
+
+// ---------------------------------------------------------------------------
+// Menu
+// ---------------------------------------------------------------------------
+// Built with createElement/textContent and a constructable stylesheet, never
+// innerHTML: messages.google.com enforces Trusted Types, so assigning innerHTML
+// throws "This document requires 'TrustedHTML'". It lives in a shadow root so
+// the app's styles can't reach in and these styles can't leak out.
+
+const MWS_MENU_ID = "messages-takeout-menu";
+
+const MWS_MENU_CSS = `
+:host { all: initial; }
+* { box-sizing: border-box; }
+.panel {
+  position: fixed; right: 20px; bottom: 20px; width: 306px; z-index: 2147483647;
+  font-family: "Google Sans", Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px; line-height: 1.45;
+  background: #fff; color: #1f1f1f;
+  border: 1px solid #dadce0; border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.18); overflow: hidden;
+}
+.head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  background: #f1f3f4; border-bottom: 1px solid #dadce0; cursor: move; user-select: none; }
+.titles { flex: 1; min-width: 0; }
+.title { font-weight: 600; }
+.who { font-size: 11px; color: #5f6368; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.x { border: 0; background: transparent; cursor: pointer; color: #5f6368;
+  font-size: 15px; line-height: 1; padding: 4px 6px; border-radius: 6px; }
+.x:hover { background: rgba(0,0,0,.08); }
+.body { padding: 12px; display: flex; flex-direction: column; gap: 13px; }
+.lab { font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: #5f6368; margin-bottom: 7px; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { flex: 1 1 auto; min-width: 54px; padding: 6px 9px; font: inherit; font-size: 12px;
+  background: #fff; color: #1f1f1f; border: 1px solid #dadce0; border-radius: 999px; cursor: pointer; }
+.seg button:hover:not(.sel) { background: #f1f3f4; }
+.seg button.sel { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+.dates { display: none; gap: 6px; margin-top: 8px; }
+.dates.on { display: flex; }
+.dates input { flex: 1; min-width: 0; padding: 5px 7px; font: inherit; font-size: 12px;
+  border: 1px solid #dadce0; border-radius: 8px; background: #fff; color: #1f1f1f; }
+.acts { display: flex; gap: 8px; }
+.acts button { flex: 1; padding: 8px; font: inherit; font-size: 13px; font-weight: 500;
+  border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
+.acts button.go { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+.acts button.go:hover:not(:disabled) { background: #1765cc; border-color: #1765cc; }
+.acts button.cp { background: #fff; color: #1a73e8; border-color: #dadce0; }
+.acts button.cp:hover:not(:disabled) { background: #f1f3f4; }
+button:disabled { opacity: .5; cursor: default; }
+.status { font-size: 11.5px; color: #5f6368; min-height: 15px; }
+.status.err { color: #c5221f; }
+.status.ok { color: #188038; }
+@media (prefers-color-scheme: dark) {
+  .panel { background: #1f1f1f; color: #e8eaed; border-color: #3c4043; }
+  .head { background: #2a2b2e; border-bottom-color: #3c4043; }
+  .who, .lab, .status, .x { color: #9aa0a6; }
+  .x:hover { background: rgba(255,255,255,.1); }
+  .seg button { background: #2a2b2e; color: #e8eaed; border-color: #3c4043; }
+  .seg button:hover:not(.sel) { background: #35363a; }
+  .seg button.sel { background: #8ab4f8; border-color: #8ab4f8; color: #202124; }
+  .dates input { background: #2a2b2e; color: #e8eaed; border-color: #3c4043; }
+  .acts button.go { background: #8ab4f8; color: #202124; border-color: #8ab4f8; }
+  .acts button.go:hover:not(:disabled) { background: #a8c7fa; border-color: #a8c7fa; }
+  .acts button.cp { background: #2a2b2e; color: #8ab4f8; border-color: #3c4043; }
+  .acts button.cp:hover:not(:disabled) { background: #35363a; }
+  .status.err { color: #f28b82; }
+  .status.ok { color: #81c995; }
+}`;
+
+function mwsEl(tag, props = {}, children = []) {
+	const node = document.createElement(tag);
+
+	for (const [key, value] of Object.entries(props)) {
+		if (key === "text") node.textContent = value;
+		else if (key === "on") for (const [ev, fn] of Object.entries(value)) node.addEventListener(ev, fn);
+		else node.setAttribute(key, value);
+	}
+
+	children.forEach(child => node.appendChild(child));
+	return node;
+}
+
+function closeExportMenu() {
+	document.getElementById(MWS_MENU_ID)?.remove();
+}
+
+function showExportMenu() {
+	closeExportMenu();
+
+	const host = mwsEl("div", { id: MWS_MENU_ID });
+	const root = host.attachShadow({ mode: "open" });
+
+	try {
+		const sheet = new CSSStyleSheet();
+		sheet.replaceSync(MWS_MENU_CSS);
+		root.adoptedStyleSheets = [sheet];
+	} catch {
+		// Older engines: a <style> element with textContent is Trusted-Types safe too.
+		root.appendChild(mwsEl("style", { text: MWS_MENU_CSS }));
+	}
+
+	const partner = document.querySelector("mw-conversation-container mws-header")
+		?.innerText.trim().split("\n")[0].trim();
+
+	let range = "7";
+	let format = "text";
+	let busy = false;
+
+	const status = mwsEl("div", { class: "status" });
+	const setStatus = (text, kind = "") => {
+		status.textContent = text;
+		status.setAttribute("class", `status ${kind}`.trim());
+	};
+
+	const today = new Date();
+	const weekAgo = new Date(Date.now() - 7 * 86400000);
+	const asValue = d => d.toISOString().slice(0, 10);
+
+	const fromInput = mwsEl("input", { type: "date", value: asValue(weekAgo), title: "From" });
+	const toInput = mwsEl("input", { type: "date", value: asValue(today), title: "To" });
+	const dates = mwsEl("div", { class: "dates" }, [fromInput, toInput]);
+
+	function segmented(options, initial, onPick) {
+		const buttons = options.map(([value, label]) =>
+			mwsEl("button", {
+				text: label,
+				class: value === initial ? "sel" : "",
+				on: {
+					click: () => {
+						if (busy) return;
+						buttons.forEach(b => b.setAttribute("class", ""));
+						buttons[options.findIndex(o => o[0] === value)].setAttribute("class", "sel");
+						onPick(value);
+					},
+				},
+			}));
+
+		return { row: mwsEl("div", { class: "seg" }, buttons), buttons };
+	}
+
+	const rangeSeg = segmented(
+		[["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["all", "All"], ["custom", "Custom"]],
+		"7",
+		value => {
+			range = value;
+			dates.setAttribute("class", value === "custom" ? "dates on" : "dates");
+			setStatus(value === "all" ? "Whole thread — this can take a while." : "");
+		});
+
+	const formatSeg = segmented(
+		[["text", "TXT"], ["json", "JSON"], ["csv", "CSV"]],
+		"text",
+		value => { format = value; });
+
+	const download = mwsEl("button", { class: "go", text: "Download" });
+	const copy = mwsEl("button", { class: "cp", text: "Copy" });
+
+	function rangeOptions() {
+		if (range === "all") return { all: true };
+		if (range !== "custom") return { days: Number(range) };
+
+		const opts = {};
+		if (fromInput.value) opts.since = fromInput.value;
+		// Include the whole end day, not just its first instant.
+		if (toInput.value) opts.until = new Date(`${toInput.value}T23:59:59.999`);
+		if (!opts.since) opts.all = true;
+		return opts;
+	}
+
+	async function run(action) {
+		if (busy) return;
+		if (!document.querySelector("mw-conversation-container")) {
+			setStatus("Open a conversation first.", "err");
+			return;
+		}
+
+		busy = true;
+		[download, copy].forEach(b => (b.disabled = true));
+		setStatus("Loading messages…");
+
+		try {
+			const messages = await exportConversation({
+				...rangeOptions(),
+				returnJson: true,
+				onProgress: p => setStatus(`Loading… ${p.loaded} messages`),
+			});
+
+			if (!messages.length) {
+				setStatus("No messages in that range.", "err");
+				return;
+			}
+
+			const body = mwsFormat(messages, format);
+
+			if (action === "copy") {
+				await navigator.clipboard.writeText(body);
+				setStatus(`Copied ${messages.length} messages.`, "ok");
+			} else {
+				mwsSaveFile(body, format);
+				setStatus(`Downloaded ${messages.length} messages.`, "ok");
+			}
+		} catch (err) {
+			setStatus(`Error: ${err.message}`, "err");
+			console.error("[export]", err);
+		} finally {
+			busy = false;
+			[download, copy].forEach(b => (b.disabled = false));
+		}
+	}
+
+	download.addEventListener("click", () => run("download"));
+	copy.addEventListener("click", () => run("copy"));
+
+	const head = mwsEl("div", { class: "head" }, [
+		mwsEl("div", { class: "titles" }, [
+			mwsEl("div", { class: "title", text: "messages-takeout" }),
+			mwsEl("div", { class: "who", text: partner || "No conversation open" }),
+		]),
+		mwsEl("button", { class: "x", text: "✕", title: "Close", on: { click: closeExportMenu } }),
+	]);
+
+	const panel = mwsEl("div", { class: "panel" }, [
+		head,
+		mwsEl("div", { class: "body" }, [
+			mwsEl("div", {}, [mwsEl("div", { class: "lab", text: "Range" }), rangeSeg.row, dates]),
+			mwsEl("div", {}, [mwsEl("div", { class: "lab", text: "Format" }), formatSeg.row]),
+			mwsEl("div", { class: "acts" }, [download, copy]),
+			status,
+		]),
+	]);
+
+	// Drag by the header, so the panel can be moved off whatever it covers.
+	head.addEventListener("mousedown", event => {
+		if (event.target.closest(".x")) return;
+
+		const box = panel.getBoundingClientRect();
+		const offsetX = event.clientX - box.left;
+		const offsetY = event.clientY - box.top;
+
+		const move = e => {
+			panel.style.left = `${Math.max(0, Math.min(innerWidth - box.width, e.clientX - offsetX))}px`;
+			panel.style.top = `${Math.max(0, Math.min(innerHeight - box.height, e.clientY - offsetY))}px`;
+			panel.style.right = "auto";
+			panel.style.bottom = "auto";
+		};
+		const up = () => {
+			removeEventListener("mousemove", move);
+			removeEventListener("mouseup", up);
+		};
+
+		addEventListener("mousemove", move);
+		addEventListener("mouseup", up);
+		event.preventDefault();
 	});
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement("a");
 
-	a.href = url;
-	a.download = filename || `conversation.${json ? "json" : "txt"}`;
-	document.body.appendChild(a);
-	a.click();
-	a.remove();
-	setTimeout(() => URL.revokeObjectURL(url), 1000);
+	root.appendChild(panel);
+	document.body.appendChild(host);
+	return host;
+}
 
-	return json ? data.length : body.length;
+// Pop the menu as soon as the script is pasted in. Wrapped so that a UI failure
+// can never take the programmatic API down with it.
+try {
+	showExportMenu();
+} catch (err) {
+	console.warn("[export] Menu failed to open; the functions still work:", err);
 }
