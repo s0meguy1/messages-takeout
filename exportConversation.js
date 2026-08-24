@@ -132,6 +132,19 @@ function mwsReactions(wrapper) {
 	return found;
 }
 
+function mwsMessageDate(wrapper) {
+	for (const part of mwsParts(wrapper)) {
+		const parsed = mwsParseAria(part.getAttribute("aria-label"));
+		if (parsed.date) return parsed.date;
+	}
+	return null;
+}
+
+function mwsOldestLoaded(conversation) {
+	const first = conversation.querySelector("mws-message-wrapper");
+	return first ? mwsMessageDate(first) : null;
+}
+
 function mwsMessageMeta(wrapper) {
 	const meta = { sender: null, date: null, reactions: [] };
 
@@ -163,10 +176,11 @@ function mwsToDate(value, fallback = null) {
 
 async function exportConversation(options = {}) {
 	const {
-		days = 7,
+		days = null,
 		since = null,
 		until = null,
 		all = false,
+		view = null,
 		returnJson = false,
 		meLabel = "Me",
 		maxLoadClicks = 500,
@@ -184,11 +198,23 @@ async function exportConversation(options = {}) {
 	}
 
 	const upperBound = mwsToDate(until);
+
+	// With no range given, export the last 7 days OR everything already on screen,
+	// whichever reaches further back. A thread can read "active 4 minutes ago" and
+	// have its previous message a month back, and a bare 7-day window returns one
+	// message while the user is looking at thirty of them.
+	const useView = view !== null ? view : (days === null && since === null && !all);
+
 	let cutoff = null;
 	if (!all) {
 		cutoff = mwsToDate(since);
-		if (!cutoff) {
-			cutoff = new Date(Date.now() - days * 86400000);
+		if (!cutoff) cutoff = new Date(Date.now() - (days ?? 7) * 86400000);
+
+		if (useView) {
+			// Measured before paging: otherwise each newly loaded batch would push
+			// the cutoff further back and the export would never stop.
+			const inView = mwsOldestLoaded(conversation);
+			if (inView && inView < cutoff) cutoff = inView;
 		}
 	}
 
@@ -439,7 +465,7 @@ async function loadThreadUntil(conversation, opts) {
 	const button = () => conversation.querySelector("mws-messages-list button.load-more");
 	const oldest = () => {
 		const first = wrappers()[0];
-		return first ? mwsMessageMeta(first).date : null;
+		return first ? mwsMessageDate(first) : null;
 	};
 
 	// The button is always parked at `position: fixed; left: -9999px` in a zero-height
@@ -448,7 +474,7 @@ async function loadThreadUntil(conversation, opts) {
 	// are the oldest loaded message's date and whether a batch actually arrived.
 	if (cutoff) {
 		const start = oldest();
-		if (start && start < cutoff) return count();
+		if (start && start <= cutoff) return count();
 		if (!start) {
 			console.warn("[export] Can't read message timestamps (non-English UI?) — " +
 				"falling back to maxLoadClicks; pass `all: true` or a bigger `maxLoadClicks` if short.");
@@ -554,6 +580,7 @@ button:disabled { opacity: .5; cursor: default; }
 .status { font-size: 11.5px; color: #5f6368; min-height: 15px; }
 .status.err { color: #c5221f; }
 .status.ok { color: #188038; }
+.status.warn { color: #b06000; }
 @media (prefers-color-scheme: dark) {
   .panel { background: #1f1f1f; color: #e8eaed; border-color: #3c4043; }
   .head { background: #2a2b2e; border-bottom-color: #3c4043; }
@@ -569,6 +596,7 @@ button:disabled { opacity: .5; cursor: default; }
   .acts button.cp:hover:not(:disabled) { background: #35363a; }
   .status.err { color: #f28b82; }
   .status.ok { color: #81c995; }
+  .status.warn { color: #fdd663; }
 }`;
 
 function mwsEl(tag, props = {}, children = []) {
@@ -584,7 +612,13 @@ function mwsEl(tag, props = {}, children = []) {
 	return node;
 }
 
+let mwsMenuTimer = null;
+
 function closeExportMenu() {
+	if (mwsMenuTimer) {
+		clearInterval(mwsMenuTimer);
+		mwsMenuTimer = null;
+	}
 	document.getElementById(MWS_MENU_ID)?.remove();
 }
 
@@ -606,7 +640,7 @@ function showExportMenu() {
 	const partner = document.querySelector("mw-conversation-container mws-header")
 		?.innerText.trim().split("\n")[0].trim();
 
-	let range = "7";
+	let range = "view";
 	let format = "text";
 	let busy = false;
 
@@ -617,7 +651,7 @@ function showExportMenu() {
 	};
 
 	const today = new Date();
-	const weekAgo = new Date(Date.now() - 7 * 86400000);
+	const weekAgo = new Date(Date.now() - 30 * 86400000);
 	const asValue = d => d.toISOString().slice(0, 10);
 
 	const fromInput = mwsEl("input", { type: "date", value: asValue(weekAgo), title: "From" });
@@ -643,13 +677,16 @@ function showExportMenu() {
 	}
 
 	const rangeSeg = segmented(
-		[["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["all", "All"], ["custom", "Custom"]],
-		"7",
+		[["view", "In view"], ["30", "30 days"], ["90", "90 days"], ["all", "All"], ["custom", "Custom"]],
+		"view",
 		value => {
 			range = value;
 			dates.setAttribute("class", value === "custom" ? "dates on" : "dates");
-			setStatus(value === "all" ? "Whole thread — this can take a while." : "");
+			updateHint();
 		});
+	rangeSeg.buttons[0].setAttribute("title", "Everything already loaded, plus the last 7 days");
+
+	[fromInput, toInput].forEach(input => input.addEventListener("change", updateHint));
 
 	const formatSeg = segmented(
 		[["text", "TXT"], ["json", "JSON"], ["csv", "CSV"]],
@@ -661,6 +698,7 @@ function showExportMenu() {
 
 	function rangeOptions() {
 		if (range === "all") return { all: true };
+		if (range === "view") return { view: true };
 		if (range !== "custom") return { days: Number(range) };
 
 		const opts = {};
@@ -669,6 +707,60 @@ function showExportMenu() {
 		if (toInput.value) opts.until = new Date(`${toInput.value}T23:59:59.999`);
 		if (!opts.since) opts.all = true;
 		return opts;
+	}
+
+	// Counts against what is already loaded, so it costs nothing and answers the
+	// question that actually bites: "why did I get one message when I can see 25?"
+	function rangeStats() {
+		const container = document.querySelector("mw-conversation-container");
+		if (!container) return null;
+
+		const wrappers = [...container.querySelectorAll("mws-message-wrapper")];
+		const opts = rangeOptions();
+		if (opts.all) return { inRange: wrappers.length, loaded: wrappers.length, all: true };
+
+		let cutoff = mwsToDate(opts.since);
+		if (!cutoff) cutoff = new Date(Date.now() - (opts.days ?? 7) * 86400000);
+		if (opts.view) {
+			const inView = mwsOldestLoaded(container);
+			if (inView && inView < cutoff) cutoff = inView;
+		}
+		const upper = mwsToDate(opts.until);
+
+		let inRange = 0;
+		for (const wrapper of wrappers) {
+			const when = mwsMessageDate(wrapper);
+			if (!when) { inRange++; continue; }        // undated messages are kept
+			if (cutoff && when < cutoff) continue;
+			if (upper && when > upper) continue;
+			inRange++;
+		}
+
+		return { inRange, loaded: wrappers.length, all: false };
+	}
+
+	function updateHint() {
+		if (busy) return;
+
+		const stats = rangeStats();
+		if (!stats) {
+			setStatus("Open a conversation first.", "err");
+			return;
+		}
+		// Switching threads empties the list for a moment before the new one renders.
+		if (!stats.loaded) {
+			setStatus("Loading conversation…");
+			return;
+		}
+		if (stats.all) {
+			setStatus(`Whole thread — ${stats.loaded} loaded so far, the rest will load.`);
+			return;
+		}
+		if (stats.inRange < stats.loaded) {
+			setStatus(`Only ${stats.inRange} of ${stats.loaded} loaded messages are in range.`, "warn");
+			return;
+		}
+		setStatus(`All ${stats.loaded} loaded messages are in range; older ones will load.`);
 	}
 
 	async function run(action) {
@@ -759,6 +851,28 @@ function showExportMenu() {
 
 	root.appendChild(panel);
 	document.body.appendChild(host);
+
+	// Angular swaps the thread in place, so there is no navigation event to hook.
+	// Poll a cheap signature instead and refresh when it moves.
+	const signature = () => [
+		location.pathname,
+		document.querySelector("mw-conversation-container mws-header")?.innerText.trim(),
+		document.querySelectorAll("mw-conversation-container mws-message-wrapper").length,
+	].join("|");
+
+	let lastSignature = signature();
+	mwsMenuTimer = setInterval(() => {
+		const current = signature();
+		if (current === lastSignature) return;
+		lastSignature = current;
+
+		const name = document.querySelector("mw-conversation-container mws-header")
+			?.innerText.trim().split("\n")[0].trim();
+		root.querySelector(".who").textContent = name || "No conversation open";
+		updateHint();
+	}, 700);
+
+	updateHint();
 	return host;
 }
 

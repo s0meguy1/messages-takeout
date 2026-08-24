@@ -1,7 +1,8 @@
 # messages-takeout
 
-Export a **Google Messages** conversation to plain text or JSON, straight from
-the browser DevTools console. No extension, no dependencies, no account access.
+Export a **Google Messages** conversation to plain text, JSON or CSV — from the
+DevTools console or a one-click bookmarklet. No extension, no dependencies, no
+account access.
 
 Google Takeout will hand you your Mail, your Photos and your Location History —
 but not the RCS threads sitting in Google Messages. This is the missing takeout.
@@ -28,7 +29,12 @@ The panel above appears in the corner. Pick a range, pick a format, then
 **Download** or **Copy**. Drag it by its header if it covers something; close it
 with **✕** and reopen it with `showExportMenu()`.
 
-It follows the browser's colour scheme:
+The status line underneath reports how many of the loaded messages fall inside
+the range you picked, and turns amber when the range is leaving some out — so a
+short export never comes as a surprise after the fact.
+
+It follows the browser's colour scheme, and updates on its own when you click
+through to a different conversation:
 
 ![The menu in light and dark themes](docs/themes.png)
 
@@ -49,7 +55,7 @@ Clicking it again is safe: it replaces the menu rather than stacking copies.
 The functions stay available for scripting:
 
 ```js
-await exportConversation();                        // last 7 days, as text
+await exportConversation();                        // what's in view, as text
 copy(await exportConversation());                  // ...onto the clipboard
 await exportConversation({ returnJson: true });    // structured objects
 await downloadConversation();                      // save conversation.txt
@@ -64,9 +70,16 @@ Promise, not messages.
 
 Google Messages keeps only the newest ~25 messages in the page and pages the
 rest in on demand, at roughly 1–4 seconds per batch. A multi-year thread is a
-long wait, so the default window is the **last 7 days**:
+long wait, so exports are bounded by a date window.
+
+The default, **In view**, is *the last 7 days or everything already loaded,
+whichever reaches further back*. A plain 7-day window is a trap: a thread can
+read "active 4 minutes ago" and have its previous message a month before that,
+so you would be looking at 25 messages on screen and get a file with 1 in it.
+**In view** always gives you at least what you can see.
 
 ```js
+await exportConversation();                        // in view (the default)
 await exportConversation({ days: 30 });            // last 30 days
 await exportConversation({ since: "2026-01-01" }); // from a fixed date
 await exportConversation({ since: "2026-01-01", until: "2026-02-01" });
@@ -81,7 +94,8 @@ Paging stops as soon as it reaches past your cutoff, so a narrow window is fast.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `days` | `7` | How far back to export |
+| `view` | `true` when no other range is given | Last 7 days **or** everything already loaded, whichever is further back |
+| `days` | `7` when set explicitly | How far back to export |
 | `since` | `null` | `Date`, `"YYYY-MM-DD"` or epoch ms; overrides `days` |
 | `until` | `null` | Optional newer bound, same formats |
 | `all` | `false` | Ignore the window and walk the whole thread |
