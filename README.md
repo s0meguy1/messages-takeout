@@ -11,7 +11,7 @@ but not the RCS threads sitting in Google Messages. This is the missing takeout.
 > (MIT). The original stopped matching the Google Messages DOM; see
 > [What changed](#what-changed).
 
-![The messages-takeout menu, in light and dark themes](docs/menu.png)
+![The messages-takeout menu open on a Google Messages conversation](docs/menu.png)
 
 ---
 
@@ -27,6 +27,10 @@ but not the RCS threads sitting in Google Messages. This is the missing takeout.
 The panel above appears in the corner. Pick a range, pick a format, then
 **Download** or **Copy**. Drag it by its header if it covers something; close it
 with **✕** and reopen it with `showExportMenu()`.
+
+It follows the browser's colour scheme:
+
+![The menu in light and dark themes](docs/themes.png)
 
 ### As a bookmarklet
 
